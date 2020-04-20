@@ -1,253 +1,177 @@
-from ._compat import filename_to_ui
-from ._compat import get_text_stderr
+# -*- coding: utf-8 -*-
+from ._compat import imap
+from ._compat import implements_to_string
 from ._compat import PY2
-from .utils import echo
+from ._compat import text_type
 
 
-def _join_param_hints(param_hint):
-    if isinstance(param_hint, (tuple, list)):
-        return " / ".join(repr(x) for x in param_hint)
-    return param_hint
-
-
-class ClickException(Exception):
-    """An exception that Click can handle and show to the user."""
-
-    #: The exit code for this exception
-    exit_code = 1
-
-    def __init__(self, message):
-        ctor_msg = message
-        if PY2:
-            if ctor_msg is not None:
-                ctor_msg = ctor_msg.encode("utf-8")
-        Exception.__init__(self, ctor_msg)
-        self.message = message
-
-    def format_message(self):
-        return self.message
-
-    def __str__(self):
-        return self.message
+class TemplateError(Exception):
+    """Baseclass for all template errors."""
 
     if PY2:
-        __unicode__ = __str__
 
-        def __str__(self):
-            return self.message.encode("utf-8")
+        def __init__(self, message=None):
+            if message is not None:
+                message = text_type(message).encode("utf-8")
+            Exception.__init__(self, message)
 
-    def show(self, file=None):
-        if file is None:
-            file = get_text_stderr()
-        echo("Error: {}".format(self.format_message()), file=file)
+        @property
+        def message(self):
+            if self.args:
+                message = self.args[0]
+                if message is not None:
+                    return message.decode("utf-8", "replace")
+
+        def __unicode__(self):
+            return self.message or u""
+
+    else:
+
+        def __init__(self, message=None):
+            Exception.__init__(self, message)
+
+        @property
+        def message(self):
+            if self.args:
+                message = self.args[0]
+                if message is not None:
+                    return message
 
 
-class UsageError(ClickException):
-    """An internal exception that signals a usage error.  This typically
-    aborts any further handling.
+@implements_to_string
+class TemplateNotFound(IOError, LookupError, TemplateError):
+    """Raised if a template does not exist.
 
-    :param message: the error message to display.
-    :param ctx: optionally the context that caused this error.  Click will
-                fill in the context automatically in some situations.
+    .. versionchanged:: 2.11
+        If the given name is :class:`Undefined` and no message was
+        provided, an :exc:`UndefinedError` is raised.
     """
 
-    exit_code = 2
+    # looks weird, but removes the warning descriptor that just
+    # bogusly warns us about message being deprecated
+    message = None
 
-    def __init__(self, message, ctx=None):
-        ClickException.__init__(self, message)
-        self.ctx = ctx
-        self.cmd = self.ctx.command if self.ctx else None
+    def __init__(self, name, message=None):
+        IOError.__init__(self, name)
 
-    def show(self, file=None):
-        if file is None:
-            file = get_text_stderr()
-        color = None
-        hint = ""
-        if self.cmd is not None and self.cmd.get_help_option(self.ctx) is not None:
-            hint = "Try '{} {}' for help.\n".format(
-                self.ctx.command_path, self.ctx.help_option_names[0]
-            )
-        if self.ctx is not None:
-            color = self.ctx.color
-            echo("{}\n{}".format(self.ctx.get_usage(), hint), file=file, color=color)
-        echo("Error: {}".format(self.format_message()), file=file, color=color)
+        if message is None:
+            from .runtime import Undefined
 
+            if isinstance(name, Undefined):
+                name._fail_with_undefined_error()
 
-class BadParameter(UsageError):
-    """An exception that formats out a standardized error message for a
-    bad parameter.  This is useful when thrown from a callback or type as
-    Click will attach contextual information to it (for instance, which
-    parameter it is).
+            message = name
 
-    .. versionadded:: 2.0
-
-    :param param: the parameter object that caused this error.  This can
-                  be left out, and Click will attach this info itself
-                  if possible.
-    :param param_hint: a string that shows up as parameter name.  This
-                       can be used as alternative to `param` in cases
-                       where custom validation should happen.  If it is
-                       a string it's used as such, if it's a list then
-                       each item is quoted and separated.
-    """
-
-    def __init__(self, message, ctx=None, param=None, param_hint=None):
-        UsageError.__init__(self, message, ctx)
-        self.param = param
-        self.param_hint = param_hint
-
-    def format_message(self):
-        if self.param_hint is not None:
-            param_hint = self.param_hint
-        elif self.param is not None:
-            param_hint = self.param.get_error_hint(self.ctx)
-        else:
-            return "Invalid value: {}".format(self.message)
-        param_hint = _join_param_hints(param_hint)
-
-        return "Invalid value for {}: {}".format(param_hint, self.message)
-
-
-class MissingParameter(BadParameter):
-    """Raised if click required an option or argument but it was not
-    provided when invoking the script.
-
-    .. versionadded:: 4.0
-
-    :param param_type: a string that indicates the type of the parameter.
-                       The default is to inherit the parameter type from
-                       the given `param`.  Valid values are ``'parameter'``,
-                       ``'option'`` or ``'argument'``.
-    """
-
-    def __init__(
-        self, message=None, ctx=None, param=None, param_hint=None, param_type=None
-    ):
-        BadParameter.__init__(self, message, ctx, param, param_hint)
-        self.param_type = param_type
-
-    def format_message(self):
-        if self.param_hint is not None:
-            param_hint = self.param_hint
-        elif self.param is not None:
-            param_hint = self.param.get_error_hint(self.ctx)
-        else:
-            param_hint = None
-        param_hint = _join_param_hints(param_hint)
-
-        param_type = self.param_type
-        if param_type is None and self.param is not None:
-            param_type = self.param.param_type_name
-
-        msg = self.message
-        if self.param is not None:
-            msg_extra = self.param.type.get_missing_message(self.param)
-            if msg_extra:
-                if msg:
-                    msg += ".  {}".format(msg_extra)
-                else:
-                    msg = msg_extra
-
-        return "Missing {}{}{}{}".format(
-            param_type,
-            " {}".format(param_hint) if param_hint else "",
-            ".  " if msg else ".",
-            msg or "",
-        )
+        self.message = message
+        self.name = name
+        self.templates = [name]
 
     def __str__(self):
-        if self.message is None:
-            param_name = self.param.name if self.param else None
-            return "missing parameter: {}".format(param_name)
-        else:
+        return self.message
+
+
+class TemplatesNotFound(TemplateNotFound):
+    """Like :class:`TemplateNotFound` but raised if multiple templates
+    are selected.  This is a subclass of :class:`TemplateNotFound`
+    exception, so just catching the base exception will catch both.
+
+    .. versionchanged:: 2.11
+        If a name in the list of names is :class:`Undefined`, a message
+        about it being undefined is shown rather than the empty string.
+
+    .. versionadded:: 2.2
+    """
+
+    def __init__(self, names=(), message=None):
+        if message is None:
+            from .runtime import Undefined
+
+            parts = []
+
+            for name in names:
+                if isinstance(name, Undefined):
+                    parts.append(name._undefined_message)
+                else:
+                    parts.append(name)
+
+            message = u"none of the templates given were found: " + u", ".join(
+                imap(text_type, parts)
+            )
+        TemplateNotFound.__init__(self, names and names[-1] or None, message)
+        self.templates = list(names)
+
+
+@implements_to_string
+class TemplateSyntaxError(TemplateError):
+    """Raised to tell the user that there is a problem with the template."""
+
+    def __init__(self, message, lineno, name=None, filename=None):
+        TemplateError.__init__(self, message)
+        self.lineno = lineno
+        self.name = name
+        self.filename = filename
+        self.source = None
+
+        # this is set to True if the debug.translate_syntax_error
+        # function translated the syntax error into a new traceback
+        self.translated = False
+
+    def __str__(self):
+        # for translated errors we only return the message
+        if self.translated:
             return self.message
 
-    if PY2:
-        __unicode__ = __str__
+        # otherwise attach some stuff
+        location = "line %d" % self.lineno
+        name = self.filename or self.name
+        if name:
+            location = 'File "%s", %s' % (name, location)
+        lines = [self.message, "  " + location]
 
-        def __str__(self):
-            return self.__unicode__().encode("utf-8")
+        # if the source is set, add the line to the output
+        if self.source is not None:
+            try:
+                line = self.source.splitlines()[self.lineno - 1]
+            except IndexError:
+                line = None
+            if line:
+                lines.append("    " + line.strip())
+
+        return u"\n".join(lines)
+
+    def __reduce__(self):
+        # https://bugs.python.org/issue1692335 Exceptions that take
+        # multiple required arguments have problems with pickling.
+        # Without this, raises TypeError: __init__() missing 1 required
+        # positional argument: 'lineno'
+        return self.__class__, (self.message, self.lineno, self.name, self.filename)
 
 
-class NoSuchOption(UsageError):
-    """Raised if click attempted to handle an option that does not
-    exist.
-
-    .. versionadded:: 4.0
+class TemplateAssertionError(TemplateSyntaxError):
+    """Like a template syntax error, but covers cases where something in the
+    template caused an error at compile time that wasn't necessarily caused
+    by a syntax error.  However it's a direct subclass of
+    :exc:`TemplateSyntaxError` and has the same attributes.
     """
 
-    def __init__(self, option_name, message=None, possibilities=None, ctx=None):
-        if message is None:
-            message = "no such option: {}".format(option_name)
-        UsageError.__init__(self, message, ctx)
-        self.option_name = option_name
-        self.possibilities = possibilities
 
-    def format_message(self):
-        bits = [self.message]
-        if self.possibilities:
-            if len(self.possibilities) == 1:
-                bits.append("Did you mean {}?".format(self.possibilities[0]))
-            else:
-                possibilities = sorted(self.possibilities)
-                bits.append("(Possible options: {})".format(", ".join(possibilities)))
-        return "  ".join(bits)
-
-
-class BadOptionUsage(UsageError):
-    """Raised if an option is generally supplied but the use of the option
-    was incorrect.  This is for instance raised if the number of arguments
-    for an option is not correct.
-
-    .. versionadded:: 4.0
-
-    :param option_name: the name of the option being used incorrectly.
+class TemplateRuntimeError(TemplateError):
+    """A generic runtime error in the template engine.  Under some situations
+    Jinja may raise this exception.
     """
 
-    def __init__(self, option_name, message, ctx=None):
-        UsageError.__init__(self, message, ctx)
-        self.option_name = option_name
+
+class UndefinedError(TemplateRuntimeError):
+    """Raised if a template tries to operate on :class:`Undefined`."""
 
 
-class BadArgumentUsage(UsageError):
-    """Raised if an argument is generally supplied but the use of the argument
-    was incorrect.  This is for instance raised if the number of values
-    for an argument is not correct.
-
-    .. versionadded:: 6.0
+class SecurityError(TemplateRuntimeError):
+    """Raised if a template tries to do something insecure if the
+    sandbox is enabled.
     """
 
-    def __init__(self, message, ctx=None):
-        UsageError.__init__(self, message, ctx)
 
-
-class FileError(ClickException):
-    """Raised if a file cannot be opened."""
-
-    def __init__(self, filename, hint=None):
-        ui_filename = filename_to_ui(filename)
-        if hint is None:
-            hint = "unknown error"
-        ClickException.__init__(self, hint)
-        self.ui_filename = ui_filename
-        self.filename = filename
-
-    def format_message(self):
-        return "Could not open file {}: {}".format(self.ui_filename, self.message)
-
-
-class Abort(RuntimeError):
-    """An internal signalling exception that signals Click to abort."""
-
-
-class Exit(RuntimeError):
-    """An exception that indicates that the application should exit with some
-    status code.
-
-    :param code: the status code to exit with.
+class FilterArgumentError(TemplateRuntimeError):
+    """This error is raised if a filter was called with inappropriate
+    arguments
     """
-
-    __slots__ = ("exit_code",)
-
-    def __init__(self, code=0):
-        self.exit_code = code

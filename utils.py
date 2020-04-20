@@ -1,455 +1,732 @@
+# -*- coding: utf-8 -*-
+import json
 import os
-import sys
+import re
+import warnings
+from collections import deque
+from random import choice
+from random import randrange
+from threading import Lock
 
-from ._compat import _default_text_stderr
-from ._compat import _default_text_stdout
-from ._compat import auto_wrap_for_ansi
-from ._compat import binary_streams
-from ._compat import filename_to_ui
-from ._compat import get_filesystem_encoding
-from ._compat import get_streerror
-from ._compat import is_bytes
-from ._compat import open_stream
-from ._compat import PY2
-from ._compat import should_strip_ansi
+from markupsafe import escape
+from markupsafe import Markup
+
+from ._compat import abc
 from ._compat import string_types
-from ._compat import strip_ansi
-from ._compat import text_streams
 from ._compat import text_type
-from ._compat import WIN
-from .globals import resolve_color_default
+from ._compat import url_quote
 
-if not PY2:
-    from ._compat import _find_binary_writer
-elif WIN:
-    from ._winconsole import _get_windows_argv
-    from ._winconsole import _hash_py_argv
-    from ._winconsole import _initial_argv_hash
+_word_split_re = re.compile(r"(\s+)")
+_punctuation_re = re.compile(
+    "^(?P<lead>(?:%s)*)(?P<middle>.*?)(?P<trail>(?:%s)*)$"
+    % (
+        "|".join(map(re.escape, ("(", "<", "&lt;"))),
+        "|".join(map(re.escape, (".", ",", ")", ">", "\n", "&gt;"))),
+    )
+)
+_simple_email_re = re.compile(r"^\S+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+$")
+_striptags_re = re.compile(r"(<!--.*?-->|<[^>]*>)")
+_entity_re = re.compile(r"&([^;]+);")
+_letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_digits = "0123456789"
 
-echo_native_types = string_types + (bytes, bytearray)
+# special singleton representing missing values for the runtime
+missing = type("MissingType", (), {"__repr__": lambda x: "missing"})()
 
+# internal code
+internal_code = set()
 
-def _posixify(name):
-    return "-".join(name.split()).lower()
+concat = u"".join
 
-
-def safecall(func):
-    """Wraps a function so that it swallows exceptions."""
-
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception:
-            pass
-
-    return wrapper
+_slash_escape = "\\/" not in json.dumps("/")
 
 
-def make_str(value):
-    """Converts a value into a valid string."""
-    if isinstance(value, bytes):
-        try:
-            return value.decode(get_filesystem_encoding())
-        except UnicodeError:
-            return value.decode("utf-8", "replace")
-    return text_type(value)
+def contextfunction(f):
+    """This decorator can be used to mark a function or method context callable.
+    A context callable is passed the active :class:`Context` as first argument when
+    called from the template.  This is useful if a function wants to get access
+    to the context or functions provided on the context object.  For example
+    a function that returns a sorted list of template variables the current
+    template exports could look like this::
 
-
-def make_default_short_help(help, max_length=45):
-    """Return a condensed version of help string."""
-    words = help.split()
-    total_length = 0
-    result = []
-    done = False
-
-    for word in words:
-        if word[-1:] == ".":
-            done = True
-        new_length = 1 + len(word) if result else len(word)
-        if total_length + new_length > max_length:
-            result.append("...")
-            done = True
-        else:
-            if result:
-                result.append(" ")
-            result.append(word)
-        if done:
-            break
-        total_length += new_length
-
-    return "".join(result)
-
-
-class LazyFile(object):
-    """A lazy file works like a regular file but it does not fully open
-    the file but it does perform some basic checks early to see if the
-    filename parameter does make sense.  This is useful for safely opening
-    files for writing.
+        @contextfunction
+        def get_exported_names(context):
+            return sorted(context.exported_vars)
     """
-
-    def __init__(
-        self, filename, mode="r", encoding=None, errors="strict", atomic=False
-    ):
-        self.name = filename
-        self.mode = mode
-        self.encoding = encoding
-        self.errors = errors
-        self.atomic = atomic
-
-        if filename == "-":
-            self._f, self.should_close = open_stream(filename, mode, encoding, errors)
-        else:
-            if "r" in mode:
-                # Open and close the file in case we're opening it for
-                # reading so that we can catch at least some errors in
-                # some cases early.
-                open(filename, mode).close()
-            self._f = None
-            self.should_close = True
-
-    def __getattr__(self, name):
-        return getattr(self.open(), name)
-
-    def __repr__(self):
-        if self._f is not None:
-            return repr(self._f)
-        return "<unopened file '{}' {}>".format(self.name, self.mode)
-
-    def open(self):
-        """Opens the file if it's not yet open.  This call might fail with
-        a :exc:`FileError`.  Not handling this error will produce an error
-        that Click shows.
-        """
-        if self._f is not None:
-            return self._f
-        try:
-            rv, self.should_close = open_stream(
-                self.name, self.mode, self.encoding, self.errors, atomic=self.atomic
-            )
-        except (IOError, OSError) as e:  # noqa: E402
-            from .exceptions import FileError
-
-            raise FileError(self.name, hint=get_streerror(e))
-        self._f = rv
-        return rv
-
-    def close(self):
-        """Closes the underlying file, no matter what."""
-        if self._f is not None:
-            self._f.close()
-
-    def close_intelligently(self):
-        """This function only closes the file if it was opened by the lazy
-        file wrapper.  For instance this will never close stdin.
-        """
-        if self.should_close:
-            self.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, tb):
-        self.close_intelligently()
-
-    def __iter__(self):
-        self.open()
-        return iter(self._f)
-
-
-class KeepOpenFile(object):
-    def __init__(self, file):
-        self._file = file
-
-    def __getattr__(self, name):
-        return getattr(self._file, name)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, tb):
-        pass
-
-    def __repr__(self):
-        return repr(self._file)
-
-    def __iter__(self):
-        return iter(self._file)
-
-
-def echo(message=None, file=None, nl=True, err=False, color=None):
-    """Prints a message plus a newline to the given file or stdout.  On
-    first sight, this looks like the print function, but it has improved
-    support for handling Unicode and binary data that does not fail no
-    matter how badly configured the system is.
-
-    Primarily it means that you can print binary data as well as Unicode
-    data on both 2.x and 3.x to the given file in the most appropriate way
-    possible.  This is a very carefree function in that it will try its
-    best to not fail.  As of Click 6.0 this includes support for unicode
-    output on the Windows console.
-
-    In addition to that, if `colorama`_ is installed, the echo function will
-    also support clever handling of ANSI codes.  Essentially it will then
-    do the following:
-
-    -   add transparent handling of ANSI color codes on Windows.
-    -   hide ANSI codes automatically if the destination file is not a
-        terminal.
-
-    .. _colorama: https://pypi.org/project/colorama/
-
-    .. versionchanged:: 6.0
-       As of Click 6.0 the echo function will properly support unicode
-       output on the windows console.  Not that click does not modify
-       the interpreter in any way which means that `sys.stdout` or the
-       print statement or function will still not provide unicode support.
-
-    .. versionchanged:: 2.0
-       Starting with version 2.0 of Click, the echo function will work
-       with colorama if it's installed.
-
-    .. versionadded:: 3.0
-       The `err` parameter was added.
-
-    .. versionchanged:: 4.0
-       Added the `color` flag.
-
-    :param message: the message to print
-    :param file: the file to write to (defaults to ``stdout``)
-    :param err: if set to true the file defaults to ``stderr`` instead of
-                ``stdout``.  This is faster and easier than calling
-                :func:`get_text_stderr` yourself.
-    :param nl: if set to `True` (the default) a newline is printed afterwards.
-    :param color: controls if the terminal supports ANSI colors or not.  The
-                  default is autodetection.
-    """
-    if file is None:
-        if err:
-            file = _default_text_stderr()
-        else:
-            file = _default_text_stdout()
-
-    # Convert non bytes/text into the native string type.
-    if message is not None and not isinstance(message, echo_native_types):
-        message = text_type(message)
-
-    if nl:
-        message = message or u""
-        if isinstance(message, text_type):
-            message += u"\n"
-        else:
-            message += b"\n"
-
-    # If there is a message, and we're in Python 3, and the value looks
-    # like bytes, we manually need to find the binary stream and write the
-    # message in there.  This is done separately so that most stream
-    # types will work as you would expect.  Eg: you can write to StringIO
-    # for other cases.
-    if message and not PY2 and is_bytes(message):
-        binary_file = _find_binary_writer(file)
-        if binary_file is not None:
-            file.flush()
-            binary_file.write(message)
-            binary_file.flush()
-            return
-
-    # ANSI-style support.  If there is no message or we are dealing with
-    # bytes nothing is happening.  If we are connected to a file we want
-    # to strip colors.  If we are on windows we either wrap the stream
-    # to strip the color or we use the colorama support to translate the
-    # ansi codes to API calls.
-    if message and not is_bytes(message):
-        color = resolve_color_default(color)
-        if should_strip_ansi(file, color):
-            message = strip_ansi(message)
-        elif WIN:
-            if auto_wrap_for_ansi is not None:
-                file = auto_wrap_for_ansi(file)
-            elif not color:
-                message = strip_ansi(message)
-
-    if message:
-        file.write(message)
-    file.flush()
-
-
-def get_binary_stream(name):
-    """Returns a system stream for byte processing.  This essentially
-    returns the stream from the sys module with the given name but it
-    solves some compatibility issues between different Python versions.
-    Primarily this function is necessary for getting binary streams on
-    Python 3.
-
-    :param name: the name of the stream to open.  Valid names are ``'stdin'``,
-                 ``'stdout'`` and ``'stderr'``
-    """
-    opener = binary_streams.get(name)
-    if opener is None:
-        raise TypeError("Unknown standard stream '{}'".format(name))
-    return opener()
-
-
-def get_text_stream(name, encoding=None, errors="strict"):
-    """Returns a system stream for text processing.  This usually returns
-    a wrapped stream around a binary stream returned from
-    :func:`get_binary_stream` but it also can take shortcuts on Python 3
-    for already correctly configured streams.
-
-    :param name: the name of the stream to open.  Valid names are ``'stdin'``,
-                 ``'stdout'`` and ``'stderr'``
-    :param encoding: overrides the detected default encoding.
-    :param errors: overrides the default error mode.
-    """
-    opener = text_streams.get(name)
-    if opener is None:
-        raise TypeError("Unknown standard stream '{}'".format(name))
-    return opener(encoding, errors)
-
-
-def open_file(
-    filename, mode="r", encoding=None, errors="strict", lazy=False, atomic=False
-):
-    """This is similar to how the :class:`File` works but for manual
-    usage.  Files are opened non lazy by default.  This can open regular
-    files as well as stdin/stdout if ``'-'`` is passed.
-
-    If stdin/stdout is returned the stream is wrapped so that the context
-    manager will not close the stream accidentally.  This makes it possible
-    to always use the function like this without having to worry to
-    accidentally close a standard stream::
-
-        with open_file(filename) as f:
-            ...
-
-    .. versionadded:: 3.0
-
-    :param filename: the name of the file to open (or ``'-'`` for stdin/stdout).
-    :param mode: the mode in which to open the file.
-    :param encoding: the encoding to use.
-    :param errors: the error handling for this file.
-    :param lazy: can be flipped to true to open the file lazily.
-    :param atomic: in atomic mode writes go into a temporary file and it's
-                   moved on close.
-    """
-    if lazy:
-        return LazyFile(filename, mode, encoding, errors, atomic=atomic)
-    f, should_close = open_stream(filename, mode, encoding, errors, atomic=atomic)
-    if not should_close:
-        f = KeepOpenFile(f)
+    f.contextfunction = True
     return f
 
 
-def get_os_args():
-    """This returns the argument part of sys.argv in the most appropriate
-    form for processing.  What this means is that this return value is in
-    a format that works for Click to process but does not necessarily
-    correspond well to what's actually standard for the interpreter.
+def evalcontextfunction(f):
+    """This decorator can be used to mark a function or method as an eval
+    context callable.  This is similar to the :func:`contextfunction`
+    but instead of passing the context, an evaluation context object is
+    passed.  For more information about the eval context, see
+    :ref:`eval-context`.
 
-    On most environments the return value is ``sys.argv[:1]`` unchanged.
-    However if you are on Windows and running Python 2 the return value
-    will actually be a list of unicode strings instead because the
-    default behavior on that platform otherwise will not be able to
-    carry all possible values that sys.argv can have.
-
-    .. versionadded:: 6.0
+    .. versionadded:: 2.4
     """
-    # We can only extract the unicode argv if sys.argv has not been
-    # changed since the startup of the application.
-    if PY2 and WIN and _initial_argv_hash == _hash_py_argv():
-        return _get_windows_argv()
-    return sys.argv[1:]
+    f.evalcontextfunction = True
+    return f
 
 
-def format_filename(filename, shorten=False):
-    """Formats a filename for user display.  The main purpose of this
-    function is to ensure that the filename can be displayed at all.  This
-    will decode the filename to unicode if necessary in a way that it will
-    not fail.  Optionally, it can shorten the filename to not include the
-    full path to the filename.
-
-    :param filename: formats a filename for UI display.  This will also convert
-                     the filename into unicode without failing.
-    :param shorten: this optionally shortens the filename to strip of the
-                    path that leads up to it.
+def environmentfunction(f):
+    """This decorator can be used to mark a function or method as environment
+    callable.  This decorator works exactly like the :func:`contextfunction`
+    decorator just that the first argument is the active :class:`Environment`
+    and not context.
     """
-    if shorten:
-        filename = os.path.basename(filename)
-    return filename_to_ui(filename)
+    f.environmentfunction = True
+    return f
 
 
-def get_app_dir(app_name, roaming=True, force_posix=False):
-    r"""Returns the config folder for the application.  The default behavior
-    is to return whatever is most appropriate for the operating system.
+def internalcode(f):
+    """Marks the function as internally used"""
+    internal_code.add(f.__code__)
+    return f
 
-    To give you an idea, for an app called ``"Foo Bar"``, something like
-    the following folders could be returned:
 
-    Mac OS X:
-      ``~/Library/Application Support/Foo Bar``
-    Mac OS X (POSIX):
-      ``~/.foo-bar``
-    Unix:
-      ``~/.config/foo-bar``
-    Unix (POSIX):
-      ``~/.foo-bar``
-    Win XP (roaming):
-      ``C:\Documents and Settings\<user>\Local Settings\Application Data\Foo Bar``
-    Win XP (not roaming):
-      ``C:\Documents and Settings\<user>\Application Data\Foo Bar``
-    Win 7 (roaming):
-      ``C:\Users\<user>\AppData\Roaming\Foo Bar``
-    Win 7 (not roaming):
-      ``C:\Users\<user>\AppData\Local\Foo Bar``
+def is_undefined(obj):
+    """Check if the object passed is undefined.  This does nothing more than
+    performing an instance check against :class:`Undefined` but looks nicer.
+    This can be used for custom filters or tests that want to react to
+    undefined variables.  For example a custom default filter can look like
+    this::
 
-    .. versionadded:: 2.0
-
-    :param app_name: the application name.  This should be properly capitalized
-                     and can contain whitespace.
-    :param roaming: controls if the folder should be roaming or not on Windows.
-                    Has no affect otherwise.
-    :param force_posix: if this is set to `True` then on any POSIX system the
-                        folder will be stored in the home folder with a leading
-                        dot instead of the XDG config home or darwin's
-                        application support folder.
+        def default(var, default=''):
+            if is_undefined(var):
+                return default
+            return var
     """
-    if WIN:
-        key = "APPDATA" if roaming else "LOCALAPPDATA"
-        folder = os.environ.get(key)
-        if folder is None:
-            folder = os.path.expanduser("~")
-        return os.path.join(folder, app_name)
-    if force_posix:
-        return os.path.join(os.path.expanduser("~/.{}".format(_posixify(app_name))))
-    if sys.platform == "darwin":
-        return os.path.join(
-            os.path.expanduser("~/Library/Application Support"), app_name
-        )
-    return os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-        _posixify(app_name),
+    from .runtime import Undefined
+
+    return isinstance(obj, Undefined)
+
+
+def consume(iterable):
+    """Consumes an iterable without doing anything with it."""
+    for _ in iterable:
+        pass
+
+
+def clear_caches():
+    """Jinja keeps internal caches for environments and lexers.  These are
+    used so that Jinja doesn't have to recreate environments and lexers all
+    the time.  Normally you don't have to care about that but if you are
+    measuring memory consumption you may want to clean the caches.
+    """
+    from .environment import _spontaneous_environments
+    from .lexer import _lexer_cache
+
+    _spontaneous_environments.clear()
+    _lexer_cache.clear()
+
+
+def import_string(import_name, silent=False):
+    """Imports an object based on a string.  This is useful if you want to
+    use import paths as endpoints or something similar.  An import path can
+    be specified either in dotted notation (``xml.sax.saxutils.escape``)
+    or with a colon as object delimiter (``xml.sax.saxutils:escape``).
+
+    If the `silent` is True the return value will be `None` if the import
+    fails.
+
+    :return: imported object
+    """
+    try:
+        if ":" in import_name:
+            module, obj = import_name.split(":", 1)
+        elif "." in import_name:
+            module, _, obj = import_name.rpartition(".")
+        else:
+            return __import__(import_name)
+        return getattr(__import__(module, None, None, [obj]), obj)
+    except (ImportError, AttributeError):
+        if not silent:
+            raise
+
+
+def open_if_exists(filename, mode="rb"):
+    """Returns a file descriptor for the filename if that file exists,
+    otherwise ``None``.
+    """
+    if not os.path.isfile(filename):
+        return None
+
+    return open(filename, mode)
+
+
+def object_type_repr(obj):
+    """Returns the name of the object's type.  For some recognized
+    singletons the name of the object is returned instead. (For
+    example for `None` and `Ellipsis`).
+    """
+    if obj is None:
+        return "None"
+    elif obj is Ellipsis:
+        return "Ellipsis"
+
+    cls = type(obj)
+
+    # __builtin__ in 2.x, builtins in 3.x
+    if cls.__module__ in ("__builtin__", "builtins"):
+        name = cls.__name__
+    else:
+        name = cls.__module__ + "." + cls.__name__
+
+    return "%s object" % name
+
+
+def pformat(obj, verbose=False):
+    """Prettyprint an object.  Either use the `pretty` library or the
+    builtin `pprint`.
+    """
+    try:
+        from pretty import pretty
+
+        return pretty(obj, verbose=verbose)
+    except ImportError:
+        from pprint import pformat
+
+        return pformat(obj)
+
+
+def urlize(text, trim_url_limit=None, rel=None, target=None):
+    """Converts any URLs in text into clickable links. Works on http://,
+    https:// and www. links. Links can have trailing punctuation (periods,
+    commas, close-parens) and leading punctuation (opening parens) and
+    it'll still do the right thing.
+
+    If trim_url_limit is not None, the URLs in link text will be limited
+    to trim_url_limit characters.
+
+    If nofollow is True, the URLs in link text will get a rel="nofollow"
+    attribute.
+
+    If target is not None, a target attribute will be added to the link.
+    """
+    trim_url = (
+        lambda x, limit=trim_url_limit: limit is not None
+        and (x[:limit] + (len(x) >= limit and "..." or ""))
+        or x
     )
+    words = _word_split_re.split(text_type(escape(text)))
+    rel_attr = rel and ' rel="%s"' % text_type(escape(rel)) or ""
+    target_attr = target and ' target="%s"' % escape(target) or ""
+
+    for i, word in enumerate(words):
+        match = _punctuation_re.match(word)
+        if match:
+            lead, middle, trail = match.groups()
+            if middle.startswith("www.") or (
+                "@" not in middle
+                and not middle.startswith("http://")
+                and not middle.startswith("https://")
+                and len(middle) > 0
+                and middle[0] in _letters + _digits
+                and (
+                    middle.endswith(".org")
+                    or middle.endswith(".net")
+                    or middle.endswith(".com")
+                )
+            ):
+                middle = '<a href="http://%s"%s%s>%s</a>' % (
+                    middle,
+                    rel_attr,
+                    target_attr,
+                    trim_url(middle),
+                )
+            if middle.startswith("http://") or middle.startswith("https://"):
+                middle = '<a href="%s"%s%s>%s</a>' % (
+                    middle,
+                    rel_attr,
+                    target_attr,
+                    trim_url(middle),
+                )
+            if (
+                "@" in middle
+                and not middle.startswith("www.")
+                and ":" not in middle
+                and _simple_email_re.match(middle)
+            ):
+                middle = '<a href="mailto:%s">%s</a>' % (middle, middle)
+            if lead + middle + trail != word:
+                words[i] = lead + middle + trail
+    return u"".join(words)
 
 
-class PacifyFlushWrapper(object):
-    """This wrapper is used to catch and suppress BrokenPipeErrors resulting
-    from ``.flush()`` being called on broken pipe during the shutdown/final-GC
-    of the Python interpreter. Notably ``.flush()`` is always called on
-    ``sys.stdout`` and ``sys.stderr``. So as to have minimal impact on any
-    other cleanup code, and the case where the underlying file is not a broken
-    pipe, all calls and attributes are proxied.
+def generate_lorem_ipsum(n=5, html=True, min=20, max=100):
+    """Generate some lorem ipsum for the template."""
+    from .constants import LOREM_IPSUM_WORDS
+
+    words = LOREM_IPSUM_WORDS.split()
+    result = []
+
+    for _ in range(n):
+        next_capitalized = True
+        last_comma = last_fullstop = 0
+        word = None
+        last = None
+        p = []
+
+        # each paragraph contains out of 20 to 100 words.
+        for idx, _ in enumerate(range(randrange(min, max))):
+            while True:
+                word = choice(words)
+                if word != last:
+                    last = word
+                    break
+            if next_capitalized:
+                word = word.capitalize()
+                next_capitalized = False
+            # add commas
+            if idx - randrange(3, 8) > last_comma:
+                last_comma = idx
+                last_fullstop += 2
+                word += ","
+            # add end of sentences
+            if idx - randrange(10, 20) > last_fullstop:
+                last_comma = last_fullstop = idx
+                word += "."
+                next_capitalized = True
+            p.append(word)
+
+        # ensure that the paragraph ends with a dot.
+        p = u" ".join(p)
+        if p.endswith(","):
+            p = p[:-1] + "."
+        elif not p.endswith("."):
+            p += "."
+        result.append(p)
+
+    if not html:
+        return u"\n\n".join(result)
+    return Markup(u"\n".join(u"<p>%s</p>" % escape(x) for x in result))
+
+
+def unicode_urlencode(obj, charset="utf-8", for_qs=False):
+    """Quote a string for use in a URL using the given charset.
+
+    This function is misnamed, it is a wrapper around
+    :func:`urllib.parse.quote`.
+
+    :param obj: String or bytes to quote. Other types are converted to
+        string then encoded to bytes using the given charset.
+    :param charset: Encode text to bytes using this charset.
+    :param for_qs: Quote "/" and use "+" for spaces.
+    """
+    if not isinstance(obj, string_types):
+        obj = text_type(obj)
+
+    if isinstance(obj, text_type):
+        obj = obj.encode(charset)
+
+    safe = b"" if for_qs else b"/"
+    rv = url_quote(obj, safe)
+
+    if not isinstance(rv, text_type):
+        rv = rv.decode("utf-8")
+
+    if for_qs:
+        rv = rv.replace("%20", "+")
+
+    return rv
+
+
+class LRUCache(object):
+    """A simple LRU Cache implementation."""
+
+    # this is fast for small capacities (something below 1000) but doesn't
+    # scale.  But as long as it's only used as storage for templates this
+    # won't do any harm.
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self._mapping = {}
+        self._queue = deque()
+        self._postinit()
+
+    def _postinit(self):
+        # alias all queue methods for faster lookup
+        self._popleft = self._queue.popleft
+        self._pop = self._queue.pop
+        self._remove = self._queue.remove
+        self._wlock = Lock()
+        self._append = self._queue.append
+
+    def __getstate__(self):
+        return {
+            "capacity": self.capacity,
+            "_mapping": self._mapping,
+            "_queue": self._queue,
+        }
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self._postinit()
+
+    def __getnewargs__(self):
+        return (self.capacity,)
+
+    def copy(self):
+        """Return a shallow copy of the instance."""
+        rv = self.__class__(self.capacity)
+        rv._mapping.update(self._mapping)
+        rv._queue.extend(self._queue)
+        return rv
+
+    def get(self, key, default=None):
+        """Return an item from the cache dict or `default`"""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def setdefault(self, key, default=None):
+        """Set `default` if the key is not in the cache otherwise
+        leave unchanged. Return the value of this key.
+        """
+        try:
+            return self[key]
+        except KeyError:
+            self[key] = default
+            return default
+
+    def clear(self):
+        """Clear the cache."""
+        self._wlock.acquire()
+        try:
+            self._mapping.clear()
+            self._queue.clear()
+        finally:
+            self._wlock.release()
+
+    def __contains__(self, key):
+        """Check if a key exists in this cache."""
+        return key in self._mapping
+
+    def __len__(self):
+        """Return the current size of the cache."""
+        return len(self._mapping)
+
+    def __repr__(self):
+        return "<%s %r>" % (self.__class__.__name__, self._mapping)
+
+    def __getitem__(self, key):
+        """Get an item from the cache. Moves the item up so that it has the
+        highest priority then.
+
+        Raise a `KeyError` if it does not exist.
+        """
+        self._wlock.acquire()
+        try:
+            rv = self._mapping[key]
+            if self._queue[-1] != key:
+                try:
+                    self._remove(key)
+                except ValueError:
+                    # if something removed the key from the container
+                    # when we read, ignore the ValueError that we would
+                    # get otherwise.
+                    pass
+                self._append(key)
+            return rv
+        finally:
+            self._wlock.release()
+
+    def __setitem__(self, key, value):
+        """Sets the value for an item. Moves the item up so that it
+        has the highest priority then.
+        """
+        self._wlock.acquire()
+        try:
+            if key in self._mapping:
+                self._remove(key)
+            elif len(self._mapping) == self.capacity:
+                del self._mapping[self._popleft()]
+            self._append(key)
+            self._mapping[key] = value
+        finally:
+            self._wlock.release()
+
+    def __delitem__(self, key):
+        """Remove an item from the cache dict.
+        Raise a `KeyError` if it does not exist.
+        """
+        self._wlock.acquire()
+        try:
+            del self._mapping[key]
+            try:
+                self._remove(key)
+            except ValueError:
+                pass
+        finally:
+            self._wlock.release()
+
+    def items(self):
+        """Return a list of items."""
+        result = [(key, self._mapping[key]) for key in list(self._queue)]
+        result.reverse()
+        return result
+
+    def iteritems(self):
+        """Iterate over all items."""
+        warnings.warn(
+            "'iteritems()' will be removed in version 3.0. Use"
+            " 'iter(cache.items())' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return iter(self.items())
+
+    def values(self):
+        """Return a list of all values."""
+        return [x[1] for x in self.items()]
+
+    def itervalue(self):
+        """Iterate over all values."""
+        warnings.warn(
+            "'itervalue()' will be removed in version 3.0. Use"
+            " 'iter(cache.values())' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return iter(self.values())
+
+    def itervalues(self):
+        """Iterate over all values."""
+        warnings.warn(
+            "'itervalues()' will be removed in version 3.0. Use"
+            " 'iter(cache.values())' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return iter(self.values())
+
+    def keys(self):
+        """Return a list of all keys ordered by most recent usage."""
+        return list(self)
+
+    def iterkeys(self):
+        """Iterate over all keys in the cache dict, ordered by
+        the most recent usage.
+        """
+        warnings.warn(
+            "'iterkeys()' will be removed in version 3.0. Use"
+            " 'iter(cache.keys())' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return iter(self)
+
+    def __iter__(self):
+        return reversed(tuple(self._queue))
+
+    def __reversed__(self):
+        """Iterate over the keys in the cache dict, oldest items
+        coming first.
+        """
+        return iter(tuple(self._queue))
+
+    __copy__ = copy
+
+
+abc.MutableMapping.register(LRUCache)
+
+
+def select_autoescape(
+    enabled_extensions=("html", "htm", "xml"),
+    disabled_extensions=(),
+    default_for_string=True,
+    default=False,
+):
+    """Intelligently sets the initial value of autoescaping based on the
+    filename of the template.  This is the recommended way to configure
+    autoescaping if you do not want to write a custom function yourself.
+
+    If you want to enable it for all templates created from strings or
+    for all templates with `.html` and `.xml` extensions::
+
+        from jinja2 import Environment, select_autoescape
+        env = Environment(autoescape=select_autoescape(
+            enabled_extensions=('html', 'xml'),
+            default_for_string=True,
+        ))
+
+    Example configuration to turn it on at all times except if the template
+    ends with `.txt`::
+
+        from jinja2 import Environment, select_autoescape
+        env = Environment(autoescape=select_autoescape(
+            disabled_extensions=('txt',),
+            default_for_string=True,
+            default=True,
+        ))
+
+    The `enabled_extensions` is an iterable of all the extensions that
+    autoescaping should be enabled for.  Likewise `disabled_extensions` is
+    a list of all templates it should be disabled for.  If a template is
+    loaded from a string then the default from `default_for_string` is used.
+    If nothing matches then the initial value of autoescaping is set to the
+    value of `default`.
+
+    For security reasons this function operates case insensitive.
+
+    .. versionadded:: 2.9
+    """
+    enabled_patterns = tuple("." + x.lstrip(".").lower() for x in enabled_extensions)
+    disabled_patterns = tuple("." + x.lstrip(".").lower() for x in disabled_extensions)
+
+    def autoescape(template_name):
+        if template_name is None:
+            return default_for_string
+        template_name = template_name.lower()
+        if template_name.endswith(enabled_patterns):
+            return True
+        if template_name.endswith(disabled_patterns):
+            return False
+        return default
+
+    return autoescape
+
+
+def htmlsafe_json_dumps(obj, dumper=None, **kwargs):
+    """Works exactly like :func:`dumps` but is safe for use in ``<script>``
+    tags.  It accepts the same arguments and returns a JSON string.  Note that
+    this is available in templates through the ``|tojson`` filter which will
+    also mark the result as safe.  Due to how this function escapes certain
+    characters this is safe even if used outside of ``<script>`` tags.
+
+    The following characters are escaped in strings:
+
+    -   ``<``
+    -   ``>``
+    -   ``&``
+    -   ``'``
+
+    This makes it safe to embed such strings in any place in HTML with the
+    notable exception of double quoted attributes.  In that case single
+    quote your attributes or HTML escape it in addition.
+    """
+    if dumper is None:
+        dumper = json.dumps
+    rv = (
+        dumper(obj, **kwargs)
+        .replace(u"<", u"\\u003c")
+        .replace(u">", u"\\u003e")
+        .replace(u"&", u"\\u0026")
+        .replace(u"'", u"\\u0027")
+    )
+    return Markup(rv)
+
+
+class Cycler(object):
+    """Cycle through values by yield them one at a time, then restarting
+    once the end is reached. Available as ``cycler`` in templates.
+
+    Similar to ``loop.cycle``, but can be used outside loops or across
+    multiple loops. For example, render a list of folders and files in a
+    list, alternating giving them "odd" and "even" classes.
+
+    .. code-block:: html+jinja
+
+        {% set row_class = cycler("odd", "even") %}
+        <ul class="browser">
+        {% for folder in folders %}
+          <li class="folder {{ row_class.next() }}">{{ folder }}
+        {% endfor %}
+        {% for file in files %}
+          <li class="file {{ row_class.next() }}">{{ file }}
+        {% endfor %}
+        </ul>
+
+    :param items: Each positional argument will be yielded in the order
+        given for each cycle.
+
+    .. versionadded:: 2.1
     """
 
-    def __init__(self, wrapped):
-        self.wrapped = wrapped
+    def __init__(self, *items):
+        if not items:
+            raise RuntimeError("at least one item has to be provided")
+        self.items = items
+        self.pos = 0
 
-    def flush(self):
+    def reset(self):
+        """Resets the current item to the first item."""
+        self.pos = 0
+
+    @property
+    def current(self):
+        """Return the current item. Equivalent to the item that will be
+        returned next time :meth:`next` is called.
+        """
+        return self.items[self.pos]
+
+    def next(self):
+        """Return the current item, then advance :attr:`current` to the
+        next item.
+        """
+        rv = self.current
+        self.pos = (self.pos + 1) % len(self.items)
+        return rv
+
+    __next__ = next
+
+
+class Joiner(object):
+    """A joining helper for templates."""
+
+    def __init__(self, sep=u", "):
+        self.sep = sep
+        self.used = False
+
+    def __call__(self):
+        if not self.used:
+            self.used = True
+            return u""
+        return self.sep
+
+
+class Namespace(object):
+    """A namespace object that can hold arbitrary attributes.  It may be
+    initialized from a dictionary or with keyword arguments."""
+
+    def __init__(*args, **kwargs):  # noqa: B902
+        self, args = args[0], args[1:]
+        self.__attrs = dict(*args, **kwargs)
+
+    def __getattribute__(self, name):
+        # __class__ is needed for the awaitable check in async mode
+        if name in {"_Namespace__attrs", "__class__"}:
+            return object.__getattribute__(self, name)
         try:
-            self.wrapped.flush()
-        except IOError as e:
-            import errno
+            return self.__attrs[name]
+        except KeyError:
+            raise AttributeError(name)
 
-            if e.errno != errno.EPIPE:
-                raise
+    def __setitem__(self, name, value):
+        self.__attrs[name] = value
 
-    def __getattr__(self, attr):
-        return getattr(self.wrapped, attr)
+    def __repr__(self):
+        return "<Namespace %r>" % self.__attrs
+
+
+# does this python version support async for in and async generators?
+try:
+    exec("async def _():\n async for _ in ():\n  yield _")
+    have_async_gen = True
+except SyntaxError:
+    have_async_gen = False
+
+
+def soft_unicode(s):
+    from markupsafe import soft_unicode
+
+    warnings.warn(
+        "'jinja2.utils.soft_unicode' will be removed in version 3.0."
+        " Use 'markupsafe.soft_unicode' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return soft_unicode(s)

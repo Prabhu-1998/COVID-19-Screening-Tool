@@ -1,22 +1,44 @@
-from ._json import json
-from .encoding import base64_decode
-from .encoding import base64_encode
-from .encoding import want_bytes
-from .exc import BadData
-from .exc import BadHeader
-from .exc import BadPayload
-from .exc import BadSignature
-from .exc import BadTimeSignature
-from .exc import SignatureExpired
-from .jws import JSONWebSignatureSerializer
-from .jws import TimedJSONWebSignatureSerializer
-from .serializer import Serializer
-from .signer import HMACAlgorithm
-from .signer import NoneAlgorithm
-from .signer import Signer
-from .timed import TimedSerializer
-from .timed import TimestampSigner
-from .url_safe import URLSafeSerializer
-from .url_safe import URLSafeTimedSerializer
+# -*- coding: utf-8 -*-
+"""Jinja is a template engine written in pure Python. It provides a
+non-XML syntax that supports inline expressions and an optional
+sandboxed environment.
+"""
+from markupsafe import escape
+from markupsafe import Markup
 
-__version__ = "1.1.0"
+from .bccache import BytecodeCache
+from .bccache import FileSystemBytecodeCache
+from .bccache import MemcachedBytecodeCache
+from .environment import Environment
+from .environment import Template
+from .exceptions import TemplateAssertionError
+from .exceptions import TemplateError
+from .exceptions import TemplateNotFound
+from .exceptions import TemplateRuntimeError
+from .exceptions import TemplatesNotFound
+from .exceptions import TemplateSyntaxError
+from .exceptions import UndefinedError
+from .filters import contextfilter
+from .filters import environmentfilter
+from .filters import evalcontextfilter
+from .loaders import BaseLoader
+from .loaders import ChoiceLoader
+from .loaders import DictLoader
+from .loaders import FileSystemLoader
+from .loaders import FunctionLoader
+from .loaders import ModuleLoader
+from .loaders import PackageLoader
+from .loaders import PrefixLoader
+from .runtime import ChainableUndefined
+from .runtime import DebugUndefined
+from .runtime import make_logging_undefined
+from .runtime import StrictUndefined
+from .runtime import Undefined
+from .utils import clear_caches
+from .utils import contextfunction
+from .utils import environmentfunction
+from .utils import evalcontextfunction
+from .utils import is_undefined
+from .utils import select_autoescape
+
+__version__ = "2.11.2"
