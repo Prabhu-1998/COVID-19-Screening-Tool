@@ -1,47 +1,62 @@
-from threading import local
+# -*- coding: utf-8 -*-
+"""
+    flask.globals
+    ~~~~~~~~~~~~~
 
-_local = local()
+    Defines all the global objects that are proxies to the current
+    active context.
 
+    :copyright: 2010 Pallets
+    :license: BSD-3-Clause
+"""
+from functools import partial
 
-def get_current_context(silent=False):
-    """Returns the current click context.  This can be used as a way to
-    access the current context object from anywhere.  This is a more implicit
-    alternative to the :func:`pass_context` decorator.  This function is
-    primarily useful for helpers such as :func:`echo` which might be
-    interested in changing its behavior based on the current context.
-
-    To push the current context, :meth:`Context.scope` can be used.
-
-    .. versionadded:: 5.0
-
-    :param silent: if set to `True` the return value is `None` if no context
-                   is available.  The default behavior is to raise a
-                   :exc:`RuntimeError`.
-    """
-    try:
-        return _local.stack[-1]
-    except (AttributeError, IndexError):
-        if not silent:
-            raise RuntimeError("There is no active click context.")
+from werkzeug.local import LocalProxy
+from werkzeug.local import LocalStack
 
 
-def push_context(ctx):
-    """Pushes a new context to the current stack."""
-    _local.__dict__.setdefault("stack", []).append(ctx)
+_request_ctx_err_msg = """\
+Working outside of request context.
+
+This typically means that you attempted to use functionality that needed
+an active HTTP request.  Consult the documentation on testing for
+information about how to avoid this problem.\
+"""
+_app_ctx_err_msg = """\
+Working outside of application context.
+
+This typically means that you attempted to use functionality that needed
+to interface with the current application object in some way. To solve
+this, set up an application context with app.app_context().  See the
+documentation for more information.\
+"""
 
 
-def pop_context():
-    """Removes the top level from the stack."""
-    _local.stack.pop()
+def _lookup_req_object(name):
+    top = _request_ctx_stack.top
+    if top is None:
+        raise RuntimeError(_request_ctx_err_msg)
+    return getattr(top, name)
 
 
-def resolve_color_default(color=None):
-    """"Internal helper to get the default value of the color flag.  If a
-    value is passed it's returned unchanged, otherwise it's looked up from
-    the current context.
-    """
-    if color is not None:
-        return color
-    ctx = get_current_context(silent=True)
-    if ctx is not None:
-        return ctx.color
+def _lookup_app_object(name):
+    top = _app_ctx_stack.top
+    if top is None:
+        raise RuntimeError(_app_ctx_err_msg)
+    return getattr(top, name)
+
+
+def _find_app():
+    top = _app_ctx_stack.top
+    if top is None:
+        raise RuntimeError(_app_ctx_err_msg)
+    return top.app
+
+
+# context locals
+_request_ctx_stack = LocalStack()
+_app_ctx_stack = LocalStack()
+current_app = LocalProxy(_find_app)
+request = LocalProxy(partial(_lookup_req_object, "request"))
+session = LocalProxy(partial(_lookup_req_object, "session"))
+g = LocalProxy(partial(_lookup_app_object, "g"))
