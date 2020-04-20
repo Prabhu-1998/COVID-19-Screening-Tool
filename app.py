@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Sun Apr 19 12:45:52 2020
-
-@author: prabhu
-"""
+from flask import Flask, render_template, request
 import nltk
 #import numpy as np
 import random
@@ -13,6 +7,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import warnings
 warnings.filterwarnings("ignore")
+
+app = Flask(__name__)
 
 f=open('covid.txt','r',errors = 'ignore')
 raw=f.read()
@@ -53,44 +49,27 @@ def response(user_response):
         return robo_response
     else:
         robo_response = robo_response+sent_tokens[idx]
-        return robo_response      
-    
-def main():
-    
+        return robo_response 
+
+
+@app.route('/')
+def home():
+    return render_template("index.html")
+
+@app.route("/get")
+def get_bot_response():
     flag=True
-    print("Are you experiencing any of these symptoms?")
-    print(" 1. Fever or sweating \n 2. Difficulty breathing \n 3. Prolonged Cough \n 4. Sore throat \n 5. Body ache \n 6. Vomiting and Diarrhea")
     while(flag==True):
-        user_response = input()
-        #user_response=user_response.lower()
-        if(user_response!='4' and user_response!='5' and user_response!='6'):
-            if(user_response=='1' or user_response=='2' or user_response=='3'):
-                print("Med-ROBO: Have you travelled internationally in last 14 days? Yes or No")
-                user_response = input()
-                if(user_response=='yes'):
-                    flag=False
-                    print("Med-ROBO: Consult Doctor Immediately..CORONA (COVID 19) HELPLINE: 011-23978046 OR 1075")
-                else:
-                    print("Take general tablets, wait for some more days. If symptoms persists, Contact Doctor")
-                    print("Med-ROBO: Any more queries on COVID-19, please ask me")
-                    user_response = input()
-                    print("Med-ROBO: ",end="")
-                    print(response(user_response))
-                    sent_tokens.remove(user_response)
-            else:
-                if(greeting(user_response)!=None):
-                    print("Med-ROBO: "+greeting(user_response))
-                else:
-                    print("Med-ROBO: ",end="")
-                    print(response(user_response))
-                    sent_tokens.remove(user_response)
+        user_response = request.args.get('msg')
+        if(user_response=='1' or user_response=='2' or user_response=='3'):
+            return "Med-ROBO: Have you travelled internationally in last 14 days? Yes or No"
+        elif(user_response == 'yes'):
+            return "Med-ROBO: Consult Doctor Immediately..CORONA (COVID 19) HELPLINE: 011-23978046 OR 1075"
+        elif(user_response == 'no' or user_response == '4' or user_response == '5' or user_response == '6'):
+            return "Take general tablets, wait for some more days. If symptoms persists, Contact Doctor. <br> Do you have any queries on COVID-19?"
         else:
-            print("Med-ROBO: No need to worry. Take Home Remedies. Stay Home.. take care..\n")
-            print("Med-ROBO: Any more queries on COVID-19, please ask me")
-            user_response = input()
-            print(response(user_response))
-            sent_tokens.remove(user_response)
-    
-    
-if __name__ == "__main__":
-    main()
+            return str(response(user_response)) 
+
+
+if __name__ == '__main__':
+    app.run()
