@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<link rel="stylesheet" type="text/css" href="/static/style.css">
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+</head>
+<body>
+<div>
+	<div id="chatbox">
+		<img src="/static/banner.png">
+		<p class="botText"><span>Hi! I'm Med-ROBO..</span></p>
+		<p class="botText"><span>Are you experiencing any of these symptoms?")</span></p>
+    	<p class="botText"><span>1. Fever or sweating <br> 2. Difficulty breathing <br> 3. Prolonged Cough <br> 4. Sore throat <br> 5. Body ache \<br> 6. Vomiting and Diarrhea </span></p>
+	</div>
+	<div id="userInput">
+		<input id="textInput" type="text" name="msg" placeholder="Message">
+		<input id="buttonInput" type="submit" value="Send">
+	</div>
+<script type="text/javascript">	
+function getBotResponse() {
+var rawText = $("#textInput").val();
+var userHtml = '<p class="userText"><span>' + rawText + '</span></p>';
+$("#textInput").val("");
+$("#chatbox").append(userHtml);
+document.getElementById('userInput').scrollIntoView({block: 'start', behavior: 'smooth'});
+$.get("/get", { msg: rawText }).done(function(data) {
+var botHtml = '<p class="botText"><span>' + data + '</span></p>';
+$("#chatbox").append(botHtml);
+document.getElementById('userInput').scrollIntoView({block: 'start', behavior: 'smooth'});
+});
+}
+$("#textInput").keypress(function(e) {
+if(e.which == 13) {
+getBotResponse();
+}
+});
+$("#buttonInput").click(function() {
+getBotResponse();
+})
+</script>
+</div>
+</body>
+</html>
