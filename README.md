@@ -24,8 +24,8 @@ Implementation:
 
 There can be two ways to implement Chatbot:
 
-1.Rule-based approach and 
-2.Self-learning bots. 
+1.Rule-based approach 
+2.Self-learning bots
 
 We are planning to create self-learning bots that involve machine learning concepts since the Rule-based 
 approach addresses only simple queries and fails to manage complex ones. We are trying to avoid NLTK as much as possible since it has all pre-built methods and try to use Natural Language processing models like Language Models and Hidden Markov Principles.
